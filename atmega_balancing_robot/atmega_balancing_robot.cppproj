@@ -28,6 +28,22 @@
     <ResetRule>0</ResetRule>
     <eraseonlaunchrule>0</eraseonlaunchrule>
     <EraseKey />
+    <avrtool>com.atmel.avrdbg.tool.stk500</avrtool>
+    <avrtoolserialnumber />
+    <avrdeviceexpectedsignature>0x1E9702</avrdeviceexpectedsignature>
+    <com_atmel_avrdbg_tool_stk500>
+      <ToolOptions>
+        <InterfaceProperties>
+        </InterfaceProperties>
+        <InterfaceName>
+        </InterfaceName>
+      </ToolOptions>
+      <ToolType>com.atmel.avrdbg.tool.stk500</ToolType>
+      <ToolNumber>
+      </ToolNumber>
+      <ToolName>STK500</ToolName>
+    </com_atmel_avrdbg_tool_stk500>
+    <avrtoolinterface />
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
     <ToolchainSettings>
@@ -143,13 +159,46 @@
     </ToolchainSettings>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="adc.cpp">
+      <SubType>compile</SubType>
+    </Compile>
+    <Compile Include="adc.h">
+      <SubType>compile</SubType>
+    </Compile>
+    <Compile Include="buzzer.cpp">
+      <SubType>compile</SubType>
+    </Compile>
+    <Compile Include="buzzer.h">
+      <SubType>compile</SubType>
+    </Compile>
+    <Compile Include="kalman_filter.cpp">
+      <SubType>compile</SubType>
+    </Compile>
+    <Compile Include="kalman_filter.h">
+      <SubType>compile</SubType>
+    </Compile>
+    <Compile Include="motor_controller.cpp">
+      <SubType>compile</SubType>
+    </Compile>
     <Compile Include="motor_controller.h">
       <SubType>compile</SubType>
     </Compile>
     <Compile Include="main.cpp">
       <SubType>compile</SubType>
     </Compile>
-    <Compile Include="MPU60500.h">
+    <Compile Include="MPU6050.cpp">
+      <SubType>compile</SubType>
+    </Compile>
+    <Compile Include="MPU6050.h">
+      <SubType>compile</SubType>
+    </Compile>
+    <Compile Include="timer3_controller.cpp">
+      <SubType>compile</SubType>
+    </Compile>
+    <Compile Include="timer3_controller.h">
+      <SubType>compile</SubType>
+    </Compile>
+    <Compile Include="uart0.cpp">
       <SubType>compile</SubType>
     </Compile>
     <Compile Include="uart0.h">

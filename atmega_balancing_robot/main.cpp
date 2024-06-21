@@ -10,222 +10,253 @@
 #include <avr/interrupt.h>
 #include <util/delay.h>
 
-#include "MPU60500.h"
+#include "MPU6050.h"
 #include "motor_controller.h"
 #include "uart0.h"
+#include "timer3_controller.h"
+#include "adc.h"
+#include "buzzer.h"
+#include "kalman_filter.h"
 
-#define DEBUG0
+// #define DEBUG0
 
 motor_controller dc_controller;
 debug_uart0 debug0;
+gyro_controller mpu6050;
+timer3_controller led_servo;
+adc_controller adc;
+buzzer_controller buzzer;
+kalman_filter kal;
 
-void timer2_init()
+void timer0_init()
 {
-  TCCR2 = (1 << WGM21) | (1 << CS22);  // ctc mode , prescaler 256
-  OCR2 = 250;                          // 100hz
-  TIMSK |= (1 << OCIE2);
-}
-void  timer0_init()
-{
-	// timer0 for motor control
-	TCCR0 |= (1 << WGM01); // CTC(Clear Timer on Compare match) mode
-	TCCR0 |= ((1 << CS02)); // prescaler 1024
-	// calculate OCR0 for 8ms
-	// 8ms = OCR0 * 1 / (clk / prescaler)
-	// OCR0 = 0.008s * (clk / prescaler) = 0.008s * (16MHz / 1024) = 125
-	OCR0 = 250;
-	
+  // timer0 for motor control
+  TCCR0 |= (1 << WGM01);                 // CTC(Clear Timer on Compare match) mode
+  TCCR0 |= ((1 << CS02) | (1 << CS01));  // prescaler 256
+
+  // OCR0 = 0.004s * (clk / prescaler) = 0.004s * (16MHz / 256) = 250
+  OCR0 = 250;
+
   TIMSK |= (1 << OCIE0);
-  
 }
 
-#define ANGLE_IRQ_PERIOD 0.004f
-#define ANGLE_STD_DEV_OF_GYRO 4
-#define ANGLE_STD_DEV_OF_ACCEL 3
-
-struct vec3d
+ISR(TIMER0_COMP_vect)
 {
-  double x, y, z;
-};
+  PORTD |= 0x04;
 
-double P[2][2] = { { 0, 0 }, { 0, 0 } };
-double K[2] = { 0, 0 };
+  mpu6050.get();
 
-double Q_angle = 0.01;
-double Q_gyroBias = 0.01;
-double KFbias = 0;
-double KFangle = 0;
-double KFangle_output = 0;
-double R_measure = 0.001;
+  const double dt = 0.004f;
 
-double Kalman(double newAngle, double newrate)
-{
-  double dt = 0.002;
-  // 1. project the state ahead
-  double KFrate = newrate - KFbias;
-  KFangle += dt * KFrate;
+  double gyro_y = mpu6050.g_gyro[1];
 
-  // 2. project the error covariance ahead
-  P[0][0] += dt * (dt * P[1][1] - P[0][1] - P[1][0] + Q_angle);
-  P[0][1] -= dt * P[1][1];
-  P[1][0] -= dt * P[1][1];
-  P[1][1] += Q_gyroBias * dt;
+  double acc_z = -mpu6050.g_acc[2] - pow(gyro_y * M_PI / 180.0, 2) * 0.1;
+  double acc_x = mpu6050.g_acc[0];
 
-  // 1. Compute the Kalman Gain
-  float S = P[0][0] + R_measure;
+  double angle_ax = atan2(acc_x, acc_z) * 180 / 3.141592;
 
-  K[0] = P[0][0] / S;
-  K[1] = P[1][0] / S;
+  double z[2] = { angle_ax, gyro_y };
+  double x[2];
+  kal.update(z, x);
 
-  // 2. Update estimate with measurement ZK
-  KFangle += K[0] * (newAngle - KFangle);
-  KFbias += K[1] * (newAngle - KFangle);
+  static const float kp = 0.005f;   // proportional gain
+  static const float kd = 0.0004f;  // derivative gain
+  static const float ki = 0.000f;   // integral gain
 
-  // 3. Update error covariance
-  double P00_tmp = P[0][0];
-  double P01_tmp = P[0][1];
+  static float error_sum = 0.0f;
+  static float prev_error = 0.0f;
 
-  P[0][0] -= K[0] * P00_tmp;
-  P[0][1] -= K[0] * P01_tmp;
-  P[1][0] -= K[1] * P00_tmp;
-  P[1][1] -= K[1] * P01_tmp;
+  float error = x[0] - 5.0;                      // for p term
+  float error_diff = (error - prev_error) / dt;  // for d term
+  error_sum += error * dt;                       // for i term
+  if (error_sum > 20.f)
+    error_sum = 100.f;  // anti-windup
 
-  return KFangle;
-}
+  float semi_duty_ratio = -(kp * error + kd * error_diff + ki * error_sum);
 
-volatile double angle_gx;
-ISR(TIMER2_COMP_vect)
-{
+  float duty_ratio;
 
-  const double dt = 0.002f;
+  const double min_ratio = 0.52;
 
-  double acc_z=-g_acc[2]-pow(g_gyro[1]*M_PI/180.0,2)*0.1;
-  double acc_x=g_acc[0];
-  
-  
-  
-  
-  
-  double acc_front=pow(acc_z,2)+pow(acc_x,2)-1.0;
-  if(acc_front<0)
+  if (semi_duty_ratio > 0)
   {
-	  acc_front=0.0;
+    duty_ratio = min_ratio + (1 - min_ratio) * semi_duty_ratio;
   }
   else
   {
-	  acc_front=sqrt(acc_front);
+    duty_ratio = -min_ratio + (1 - min_ratio) * semi_duty_ratio;
   }
-  
-  
-  double acc_g=1;
-  
 
-  double angle_ax = atan2(g_acc[0], acc_z) * 180 / 3.141592;
-  
-  double th2=atan2(acc_x,acc_z);
-  double th1=atan2(acc_front,acc_g);
-  //double angle_ax=(th2-th1)*180/3.141592;
-
-  angle_gx = g_gyro[1] * dt + angle_gx;
-
-  double alpha = 0.96;
-  double roll = alpha * angle_gx + (1.000 - alpha) * angle_ax;
-
-  angle_gx = Kalman(roll, g_gyro[1]);
-
-  debug0.tx("angle : ");
-  debug0.tx(angle_ax);
-  debug0.tx("\n\r");
-
-
-#ifdef DEBUG0
-  debug0.tx("acc: ");
-
-  for (int i = 0; i < 3; i++)
+  if (duty_ratio > 0.7)
   {
-    debug0.tx(g_acc[i]);
-    debug0.tx(", ");
+    duty_ratio = 0.7;
   }
-  debug0.tx("     gyro: ");
-  for (int i = 0; i < 3; i++)
+  else if (duty_ratio < -0.7)
   {
-    debug0.tx(g_gyro[i]);
-    debug0.tx(", ");
+    duty_ratio = -0.7;
   }
-  debug0.tx("\n\r");
-#endif
-}
 
-ISR(TIMER0_COMP_vect) {
+  dc_controller.set_duty(duty_ratio, duty_ratio);
 
-	static const float dt = 0.004f; // 8ms
-	static const float kp = 0.008f; // proportional gain
-	static const float kd = 0.004f; // derivative gain
-	static const float ki = 0.000f; // integral gain
+  prev_error = error;
 
-	static float error_sum = 0.0f;
-	static float prev_error = 0.0f;
+  static int adc_mode = 0;
 
-	float error = angle_gx; // for p term
-	float error_diff = (error - prev_error) / dt; // for d term
-	error_sum += error * dt; // for i term
-	if (error_sum > 20.f) error_sum = 100.f; // anti-windup
+  switch (adc_mode)
+  {
+    case 0: {
+	    adc.run_adc(adc_controller::IR_L);
+      adc_mode = 1;
+      break;
+    }
+    case 1: {
+      adc.run_adc(adc_controller::IR_R);
+      static int servo1_cnt = 0;
+      if (++servo1_cnt > 39)
+      {
+        servo1_cnt = 0;
 
-	float semi_duty_ratio = -(kp * error + kd * error_diff + ki * error_sum);
+        static int servo_pos = 1;
+        if (servo_pos)
+        {
+          if (adc.get_iir_data(adc_controller::IR_L) < 2.5)
+          {
+            led_servo.set_servo_degree(1, 0);
+          }
+          else
+          {
+            led_servo.set_servo_degree(1, 90);
+          }
+          servo_pos = 0;
+        }
+        else
+        {
+          if (adc.get_iir_data(adc_controller::IR_R) < 3.5)
+          {
+            led_servo.set_servo_degree(1, 180);
+          }
+          else
+          {
+            led_servo.set_servo_degree(1, 90);
+          }
+          servo_pos = 1;
+        }
+      }
+      //debug0.tx(adc.get_iir_data(adc_controller::IR_L));
+      //debug0.tx(",");
+      //debug0.tx(adc.get_iir_data(adc_controller::IR_R));
+      //debug0.tx("\n");
+      adc_mode = 2;
+      break;
+    }
+    case 2: {
+      adc.run_adc(adc_controller::PSD);
+      buzzer.off_buzzer();
+      static int before_time = 0;
+      before_time++;
+      double psd = 3.5 - adc.get_iir_data(adc_controller::PSD);
+      if (psd < 3.0 && psd * 10 < before_time)
+      {
+        before_time = -1;
+        buzzer.on_buzzer(660);
+      }
+      debug0.tx(adc.idx[6]);
+      debug0.tx(" ");
+      debug0.tx(adc.data[6][0]);
+      debug0.tx(" ");
+      debug0.tx(adc.data[6][1]);
+      debug0.tx(" ");
+      debug0.tx(adc.data[6][2]);
+      debug0.tx(" ");
+      debug0.tx(adc.iir[6][0]);
+      debug0.tx(" ");
+      debug0.tx(adc.iir[6][1]);
+      debug0.tx(" ");
+      debug0.tx(adc.iir[6][2]);
+      debug0.tx(" ");
+      
+      //debug0.tx(adc.get_iir_data(adc_controller::PSD));
+      debug0.tx("\n");
+      adc_mode = 3;
+      break;
+    }
+    case 3: {
+      adc.run_adc(adc_controller::CDS);
+      static int light_cnt = 0;
+      if (++light_cnt > 9)
+      {
+        light_cnt = 0;
 
-	
-	float duty_ratio;
-	
-	const double min_ratio=0.55;
-	
-	if(semi_duty_ratio>0)
-	{
-		duty_ratio=min_ratio+(1-min_ratio)*semi_duty_ratio;
-	}
-	else
-	{
-		duty_ratio=-min_ratio+(1-min_ratio)*semi_duty_ratio;
-	}
+        double lux = adc.get_cds_lux();
 
-	if(duty_ratio>0.7)
-	{
-		duty_ratio=0.7;
-	}
-	else if(duty_ratio<-0.7)
-	{
-		duty_ratio=-0.7;
-	}
+        double duty = (150.0 - lux) / 150.0;
 
-debug0.tx("ratio : ");
-debug0.tx(duty_ratio);
-debug0.tx("\n\r");
-	
-	
-	
-	dc_controller.set_duty(duty_ratio,duty_ratio);
+        if (duty > 0.0)
+        {
+          led_servo.set_led_duty(1.0 - duty);
+        }
+        else
+        {
+          led_servo.set_led_duty(1.0);
+        }
+      }
+      //debug0.tx(adc.get_iir_data(adc_controller::CDS));
+      //debug0.tx("\n");
+      adc_mode = 4;
+      break;
+    }
+    case 4: {
+	    adc.run_adc(adc_controller::LM35);
+	    static int temp_cnt = 0;
+	    if (++temp_cnt > 9)
+	    {
+		    temp_cnt = 0;
+		    double temp = adc.get_lm35_temp();
 
-	prev_error = error;
+		    if (temp < 0)
+		    {
+			    temp = 0;
+		    }
+		    else if (temp > 50.0)
+		    {
+			    temp = 50.0;
+		    }
 
+		    double servo_deg = temp * 180.0 / 50.0;
+		    led_servo.set_servo_degree(0, servo_deg);
+	    }
+      adc_mode = 0;
+      break;
+    }
+
+    default:
+      break;
+  }
+
+  PORTD &= ~0x04;
 }
 
 int main(void)
 {
   dc_controller.reg_init();
   debug0.reg_init();
-  set_TWI();
+  mpu6050.reg_init();
   timer0_init();
-  timer2_init();
+  led_servo.reg_init();
+  adc.reg_init();
+  buzzer.reg_init();
 
   DDRA = 0xff;
   PORTA = 0x00;
 
-  set_MPU6050();
-  
+  mpu6050.set();
+
+  DDRD |= 0x04;
+  PORTD |= 0x04;
 
   sei();
 
   while (1)
   {
-	  get_MPU6050();
   }
 }
